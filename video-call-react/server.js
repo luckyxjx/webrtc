@@ -10,8 +10,8 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIO(server, {
   cors: {
-    origin: '*', // Allow all origins for development
-    methods: ['GET', 'POST']
+    origin: "http://localhost:3000",
+    methods: ["GET", "POST"]
   }
 });
 
@@ -23,79 +23,99 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'build', 'index.html'));
 });
 
+const rooms = new Map(); // roomId -> { admin: string, users: Set<string> }
+
 // Socket.IO connection handling
 io.on('connection', (socket) => {
-  console.log('A user connected:', socket.id);
+  console.log('User connected:', socket.id);
   
   // Handle room joining
   socket.on('join-room', ({ roomId, userId }) => {
-    console.log(`User ${userId} (socket: ${socket.id}) joining room ${roomId}`);
+    console.log(`User ${userId} joining room ${roomId}`);
+    
+    // Initialize room if it doesn't exist
+    if (!rooms.has(roomId)) {
+      rooms.set(roomId, { admin: userId, users: new Set() });
+    }
+    
+    const room = rooms.get(roomId);
+    room.users.add(userId);
+    
     socket.join(roomId);
-    
-    // Store user info
-    socket.userId = userId;
-    socket.roomId = roomId;
-    
-    // Get all users in the room
-    const room = io.sockets.adapter.rooms.get(roomId);
-    const roomUsers = Array.from(room || [])
-      .map(socketId => {
-        const socket = io.sockets.sockets.get(socketId);
-        return socket?.userId;
-      })
-      .filter(id => id && id !== userId);
-    
-    console.log('Users in room:', roomUsers);
-    
-    // Notify other users in the room
     socket.to(roomId).emit('user-joined', userId);
     
-    // Send list of existing users to the new user
-    socket.emit('room-users', roomUsers);
+    // Send current room users to the new participant
+    io.to(roomId).emit('room-users', Array.from(room.users));
   });
   
   // Handle disconnection
   socket.on('disconnect', () => {
-    if (socket.roomId) {
-      console.log(`User ${socket.userId} (socket: ${socket.id}) disconnected from room ${socket.roomId}`);
-      socket.to(socket.roomId).emit('user-left', socket.userId);
-    }
+    console.log('User disconnected:', socket.id);
+    // Find and leave all rooms the user was in
+    rooms.forEach((room, roomId) => {
+      if (room.users.has(socket.id)) {
+        room.users.delete(socket.id);
+        
+        // If admin disconnects, assign new admin or delete room
+        if (room.admin === socket.id) {
+          const remainingUsers = Array.from(room.users);
+          if (remainingUsers.length > 0) {
+            room.admin = remainingUsers[0];
+            io.to(remainingUsers[0]).emit('admin-assigned');
+          } else {
+            rooms.delete(roomId);
+          }
+        }
+        
+        socket.to(roomId).emit('user-left', socket.id);
+        io.to(roomId).emit('room-users', Array.from(room.users));
+      }
+    });
   });
   
   // Signaling for WebRTC
   socket.on('offer', ({ offer, to }) => {
-    console.log(`Offer from ${socket.userId} to ${to}`);
-    const targetSocket = Array.from(io.sockets.sockets.values())
-      .find(s => s.userId === to);
-    
-    if (targetSocket) {
-      targetSocket.emit('offer', { offer, from: socket.userId });
-    } else {
-      console.log(`Target user ${to} not found`);
-    }
+    socket.to(to).emit('offer', { offer, from: socket.id });
   });
   
   socket.on('answer', ({ answer, to }) => {
-    console.log(`Answer from ${socket.userId} to ${to}`);
-    const targetSocket = Array.from(io.sockets.sockets.values())
-      .find(s => s.userId === to);
-    
-    if (targetSocket) {
-      targetSocket.emit('answer', { answer, from: socket.userId });
-    } else {
-      console.log(`Target user ${to} not found`);
-    }
+    socket.to(to).emit('answer', { answer, from: socket.id });
   });
   
   socket.on('ice-candidate', ({ candidate, to }) => {
-    console.log(`ICE candidate from ${socket.userId} to ${to}`);
-    const targetSocket = Array.from(io.sockets.sockets.values())
-      .find(s => s.userId === to);
-    
-    if (targetSocket) {
-      targetSocket.emit('ice-candidate', { candidate, from: socket.userId });
-    } else {
-      console.log(`Target user ${to} not found`);
+    socket.to(to).emit('ice-candidate', { candidate, from: socket.id });
+  });
+
+  socket.on('leave-room', (roomId) => {
+    console.log(`User leaving room ${roomId}`);
+    const room = rooms.get(roomId);
+    if (room) {
+      room.users.delete(socket.id);
+      
+      // If admin leaves, assign new admin or delete room
+      if (room.admin === socket.id) {
+        const remainingUsers = Array.from(room.users);
+        if (remainingUsers.length > 0) {
+          room.admin = remainingUsers[0];
+          io.to(remainingUsers[0]).emit('admin-assigned');
+        } else {
+          rooms.delete(roomId);
+        }
+      }
+      
+      socket.leave(roomId);
+      socket.to(roomId).emit('user-left', socket.id);
+      io.to(roomId).emit('room-users', Array.from(room.users));
+    }
+  });
+
+  socket.on('admin-command', ({ command, targetId, roomId }) => {
+    const room = rooms.get(roomId);
+    if (room && room.admin === socket.id) {
+      // Verify the target user is in the room
+      if (room.users.has(targetId)) {
+        io.to(targetId).emit('admin-command', { command, targetId });
+      }
     }
   });
 });

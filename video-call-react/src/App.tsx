@@ -190,7 +190,7 @@ const VideoGrid = styled.div<{ participants: number }>`
   }
 `;
 
-const VideoItem = styled.div`
+const VideoItem = styled.div<{ isLocal?: boolean }>`
   position: relative;
   background-color: #0F172A;
   border-radius: 8px;
@@ -209,6 +209,7 @@ const VideoItem = styled.div`
     height: 100%;
     object-fit: contain;
     background-color: #0F172A;
+    transform: ${props => props.isLocal ? 'scaleX(-1)' : 'none'};
   }
 `;
 
@@ -340,6 +341,67 @@ const LoadingSpinner = styled.div`
   }
 `;
 
+const AdminControls = styled.div`
+  position: absolute;
+  top: 1rem;
+  left: 1rem;
+  display: flex;
+  gap: 0.5rem;
+  z-index: 1000;
+`;
+
+const ParticipantList = styled.div`
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  min-width: 200px;
+  max-width: 300px;
+  z-index: 1000;
+`;
+
+const ParticipantItem = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  
+  &:last-child {
+    border-bottom: none;
+  }
+`;
+
+const ParticipantControls = styled.div`
+  display: flex;
+  gap: 0.5rem;
+`;
+
+const SmallButton = styled.button`
+  padding: 0.25rem 0.5rem;
+  border: none;
+  border-radius: 4px;
+  background-color: var(--primary);
+  color: white;
+  cursor: pointer;
+  font-size: 0.75rem;
+  transition: all 0.2s ease;
+
+  &:hover {
+    background-color: var(--primary-dark);
+  }
+
+  &.danger {
+    background-color: var(--danger);
+    &:hover {
+      background-color: #DC2626;
+    }
+  }
+`;
+
 function App() {
   const [roomId, setRoomId] = useState('');
   const [userId, setUserId] = useState('');
@@ -354,6 +416,9 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'connecting' | 'disconnected'>('disconnected');
   const [error, setError] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [showParticipantList, setShowParticipantList] = useState(false);
+  const [participants, setParticipants] = useState<{ id: string; isMuted: boolean; isVideoOff: boolean }[]>([]);
 
   useEffect(() => {
     const newSocket = io('http://localhost:3002');
@@ -403,6 +468,51 @@ function App() {
         console.log('User left:', userId);
         handleUserLeft(userId);
       });
+
+      socket.on('admin-command', ({ command, targetId }) => {
+        switch (command) {
+          case 'mute':
+            if (localStream) {
+              localStream.getAudioTracks().forEach(track => {
+                track.enabled = false;
+              });
+              setIsMuted(true);
+              showNotification('You have been muted by the admin', 'info');
+            }
+            break;
+          case 'unmute':
+            if (localStream) {
+              localStream.getAudioTracks().forEach(track => {
+                track.enabled = true;
+              });
+              setIsMuted(false);
+              showNotification('You have been unmuted by the admin', 'info');
+            }
+            break;
+          case 'video-off':
+            if (localStream) {
+              localStream.getVideoTracks().forEach(track => {
+                track.enabled = false;
+              });
+              setIsVideoOff(true);
+              showNotification('Your video has been turned off by the admin', 'info');
+            }
+            break;
+          case 'video-on':
+            if (localStream) {
+              localStream.getVideoTracks().forEach(track => {
+                track.enabled = true;
+              });
+              setIsVideoOff(false);
+              showNotification('Your video has been turned on by the admin', 'info');
+            }
+            break;
+          case 'remove':
+            showNotification('You have been removed from the room by the admin', 'error');
+            leaveRoom();
+            break;
+        }
+      });
     }
   }, [socket]);
 
@@ -434,6 +544,11 @@ function App() {
 
   const handleRoomUsers = (users: string[]) => {
     console.log('Handling room users:', users);
+    setParticipants(users.map(id => ({
+      id,
+      isMuted: false,
+      isVideoOff: false
+    })));
     users.forEach(userId => {
       if (userId !== socket?.id) {
         console.log('Creating peer connection for user:', userId);
@@ -597,6 +712,7 @@ function App() {
     const newUserId = generateUID();
     setRoomId(newRoomId);
     setUserId(newUserId);
+    setIsAdmin(true); // Room creator becomes admin
   };
 
   const joinRoom = async () => {
@@ -679,6 +795,35 @@ function App() {
     });
   };
 
+  const sendAdminCommand = (command: string, targetId: string) => {
+    socket?.emit('admin-command', { command, targetId, roomId });
+  };
+
+  const toggleParticipantMute = (participantId: string) => {
+    const participant = participants.find(p => p.id === participantId);
+    if (participant) {
+      sendAdminCommand(participant.isMuted ? 'unmute' : 'mute', participantId);
+      setParticipants(prev => prev.map(p => 
+        p.id === participantId ? { ...p, isMuted: !p.isMuted } : p
+      ));
+    }
+  };
+
+  const toggleParticipantVideo = (participantId: string) => {
+    const participant = participants.find(p => p.id === participantId);
+    if (participant) {
+      sendAdminCommand(participant.isVideoOff ? 'video-on' : 'video-off', participantId);
+      setParticipants(prev => prev.map(p => 
+        p.id === participantId ? { ...p, isVideoOff: !p.isVideoOff } : p
+      ));
+    }
+  };
+
+  const removeParticipant = (participantId: string) => {
+    sendAdminCommand('remove', participantId);
+    setParticipants(prev => prev.filter(p => p.id !== participantId));
+  };
+
   return (
     <ThemeProvider theme={{}}>
       <GlobalStyle />
@@ -699,6 +844,37 @@ function App() {
             <LoadingOverlay>
               <LoadingSpinner />
             </LoadingOverlay>
+          )}
+          {isAdmin && isJoined && (
+            <AdminControls>
+              <Button onClick={() => setShowParticipantList(!showParticipantList)}>
+                {showParticipantList ? 'Hide Participants' : 'Show Participants'}
+              </Button>
+            </AdminControls>
+          )}
+          {isAdmin && showParticipantList && (
+            <ParticipantList>
+              <h3>Participants</h3>
+              {participants.map(participant => (
+                <ParticipantItem key={participant.id}>
+                  <span>{participant.id}</span>
+                  <ParticipantControls>
+                    <SmallButton onClick={() => toggleParticipantMute(participant.id)}>
+                      {participant.isMuted ? 'Unmute' : 'Mute'}
+                    </SmallButton>
+                    <SmallButton onClick={() => toggleParticipantVideo(participant.id)}>
+                      {participant.isVideoOff ? 'Video On' : 'Video Off'}
+                    </SmallButton>
+                    <SmallButton 
+                      className="danger"
+                      onClick={() => removeParticipant(participant.id)}
+                    >
+                      Remove
+                    </SmallButton>
+                  </ParticipantControls>
+                </ParticipantItem>
+              ))}
+            </ParticipantList>
           )}
           <RoomSection>
             <h2>Room</h2>
@@ -729,7 +905,7 @@ function App() {
           </RoomSection>
           <VideoSection>
             <VideoGrid participants={Object.keys(remoteStreams).length + 1}>
-              <VideoItem>
+              <VideoItem isLocal>
                 <video
                   ref={localVideoRef}
                   autoPlay
